@@ -29,13 +29,19 @@ impl ProfileStore {
     }
 
     fn load_from(path: Option<&Path>) -> ProfileStore {
-        let Some(path) = path else { return ProfileStore::default() };
-        let Ok(contents) = std::fs::read_to_string(path) else { return ProfileStore::default() };
+        let Some(path) = path else {
+            return ProfileStore::default();
+        };
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return ProfileStore::default();
+        };
         serde_json::from_str(&contents).unwrap_or_default()
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        self.save_to(Self::path().ok_or_else(|| std::io::Error::other("no config directory available"))?)
+        self.save_to(
+            Self::path().ok_or_else(|| std::io::Error::other("no config directory available"))?,
+        )
     }
 
     fn save_to(&self, path: PathBuf) -> std::io::Result<()> {
@@ -48,7 +54,11 @@ impl ProfileStore {
 
     /// Creates a new profile, or overwrites the changeset of an existing one with the same name.
     pub fn upsert(&mut self, name: String, changeset: Changeset) {
-        if let Some(existing) = self.profiles.iter_mut().find(|profile| profile.name == name) {
+        if let Some(existing) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == name)
+        {
             existing.changeset = changeset;
         } else {
             self.profiles.push(Profile { name, changeset });

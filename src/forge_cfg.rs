@@ -90,14 +90,26 @@ impl std::error::Error for ParseError {}
 
 pub fn parse(input: &str) -> Result<ConfigFile, ParseError> {
     let lines: Vec<&str> = input.lines().collect();
-    let mut parser = Parser { lines: &lines, pos: 0 };
+    let mut parser = Parser {
+        lines: &lines,
+        pos: 0,
+    };
 
     let mut pending_comment: Vec<String> = Vec::new();
     let mut header_comment: Vec<String> = Vec::new();
     let mut config_version: Option<String> = None;
-    let items = parser.parse_items(&mut pending_comment, &mut header_comment, &mut config_version, true)?;
+    let items = parser.parse_items(
+        &mut pending_comment,
+        &mut header_comment,
+        &mut config_version,
+        true,
+    )?;
 
-    Ok(ConfigFile { header_comment, config_version, items })
+    Ok(ConfigFile {
+        header_comment,
+        config_version,
+        items,
+    })
 }
 
 struct Parser<'a> {
@@ -111,7 +123,10 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, message: impl Into<String>) -> ParseError {
-        ParseError { line: self.line_number(), message: message.into() }
+        ParseError {
+            line: self.line_number(),
+            message: message.into(),
+        }
     }
 
     /// Parses a sequence of items until a closing `}` (consumed) or end of input.
@@ -131,7 +146,11 @@ impl<'a> Parser<'a> {
             let trimmed = raw.trim();
 
             if trimmed.is_empty() {
-                if is_root && items.is_empty() && header_comment.is_empty() && !pending_comment.is_empty() {
+                if is_root
+                    && items.is_empty()
+                    && header_comment.is_empty()
+                    && !pending_comment.is_empty()
+                {
                     header_comment.append(pending_comment);
                 } else {
                     pending_comment.clear();
@@ -163,8 +182,13 @@ impl<'a> Parser<'a> {
             if let Some(name) = trimmed.strip_suffix('{').map(|s| s.trim().to_string()) {
                 self.pos += 1;
                 let comment = std::mem::take(pending_comment);
-                let sub_items = self.parse_items(pending_comment, header_comment, config_version, false)?;
-                items.push(Item::Category(Category { name, comment, items: sub_items }));
+                let sub_items =
+                    self.parse_items(pending_comment, header_comment, config_version, false)?;
+                items.push(Item::Category(Category {
+                    name,
+                    comment,
+                    items: sub_items,
+                }));
                 continue;
             }
 
@@ -217,7 +241,12 @@ impl<'a> Parser<'a> {
             return Err(self.error(format!("expected '=' or '<' in property line '{line}'")));
         };
 
-        Ok(Property { prop_type, name, value, comment })
+        Ok(Property {
+            prop_type,
+            name,
+            value,
+            comment,
+        })
     }
 
     fn expect_list_value(&mut self) -> Result<PropertyValue, ParseError> {
@@ -278,7 +307,13 @@ fn write_items(f: &mut fmt::Formatter<'_>, items: &[Item], depth: usize) -> fmt:
                 };
                 match &property.value {
                     PropertyValue::Single(value) => {
-                        writeln!(f, "{indent}{}:{}={}", property.prop_type.prefix(), name, value)?;
+                        writeln!(
+                            f,
+                            "{indent}{}:{}={}",
+                            property.prop_type.prefix(),
+                            name,
+                            value
+                        )?;
                     }
                     PropertyValue::List(values) => {
                         writeln!(f, "{indent}{}:{} <", property.prop_type.prefix(), name)?;
@@ -326,7 +361,10 @@ mod tests {
         let prop = find_property(&modfixes.items, "GenerateOil");
         assert_eq!(prop.prop_type, PropertyType::Bool);
         assert_eq!(prop.value, PropertyValue::Single("true".to_string()));
-        assert_eq!(prop.comment, vec!["Set to true to enable OilSpawn".to_string()]);
+        assert_eq!(
+            prop.comment,
+            vec!["Set to true to enable OilSpawn".to_string()]
+        );
     }
 
     #[test]
@@ -349,7 +387,10 @@ mod tests {
         assert_eq!(icon.value, PropertyValue::Single(String::new()));
 
         let format_message = find_property(&debug.items, "formatMessage");
-        assert_eq!(format_message.value, PropertyValue::Single("<%u> %m".to_string()));
+        assert_eq!(
+            format_message.value,
+            PropertyValue::Single("<%u> %m".to_string())
+        );
     }
 
     #[test]
@@ -387,7 +428,10 @@ mod tests {
     fn parses_header_comment() {
         let input = include_str!("../tests/fixtures/header_comment.cfg");
         let config = parse(input).unwrap();
-        assert_eq!(config.header_comment, vec!["Configuration file".to_string()]);
+        assert_eq!(
+            config.header_comment,
+            vec!["Configuration file".to_string()]
+        );
     }
 
     #[test]
@@ -397,7 +441,10 @@ mod tests {
 
         let modules = find_category(&config.items, "modules");
         let version = find_property(&modules.items, "ModPackVersion");
-        assert_eq!(version.value, PropertyValue::Single("2.9.0-beta-3".to_string()));
+        assert_eq!(
+            version.value,
+            PropertyValue::Single("2.9.0-beta-3".to_string())
+        );
 
         // Re-parsing the serialized output should yield an identical structure.
         let rendered = config.to_string();

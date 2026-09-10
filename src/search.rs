@@ -35,7 +35,10 @@ impl SearchIndex {
         if query.is_empty() {
             return self.entries.iter().collect();
         }
-        self.entries.iter().filter(|entry| entry.haystack.contains(&query)).collect()
+        self.entries
+            .iter()
+            .filter(|entry| entry.haystack.contains(&query))
+            .collect()
     }
 
     /// Updates the cached display value (and search haystack) for a single property in place,
@@ -56,7 +59,12 @@ impl SearchIndex {
     }
 }
 
-fn collect(relative_path: &Path, category_path: &[String], items: &[Item], out: &mut Vec<IndexedProperty>) {
+fn collect(
+    relative_path: &Path,
+    category_path: &[String],
+    items: &[Item],
+    out: &mut Vec<IndexedProperty>,
+) {
     for item in items {
         match item {
             Item::Property(property) => {
@@ -107,7 +115,11 @@ mod tests {
         let ast = forge_cfg::parse(cfg).unwrap();
         ConfigStore {
             minecraft_dir: PathBuf::new(),
-            files: vec![ConfigFileEntry { relative_path: PathBuf::from("thing.cfg"), ast, dirty: false }],
+            files: vec![ConfigFileEntry {
+                relative_path: PathBuf::from("thing.cfg"),
+                ast,
+                dirty: false,
+            }],
         }
     }
 

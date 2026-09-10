@@ -7,6 +7,7 @@ mod search;
 mod settings;
 
 pub fn main() -> iced::Result {
-    iced::application(app::boot, app::update, app::view).title("GTNH Config Manager").run()
+    iced::application(app::boot, app::update, app::view)
+        .title("GTNH Config Manager")
+        .run()
 }
-

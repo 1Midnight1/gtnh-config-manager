@@ -21,13 +21,19 @@ impl AppSettings {
     }
 
     fn load_from(path: Option<&Path>) -> AppSettings {
-        let Some(path) = path else { return AppSettings::default() };
-        let Ok(contents) = std::fs::read_to_string(path) else { return AppSettings::default() };
+        let Some(path) = path else {
+            return AppSettings::default();
+        };
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return AppSettings::default();
+        };
         serde_json::from_str(&contents).unwrap_or_default()
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        self.save_to(Self::path().ok_or_else(|| std::io::Error::other("no config directory available"))?)
+        self.save_to(
+            Self::path().ok_or_else(|| std::io::Error::other("no config directory available"))?,
+        )
     }
 
     fn save_to(&self, path: PathBuf) -> std::io::Result<()> {
@@ -48,7 +54,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gtnh-settings-test-{}", std::process::id()));
         let path = dir.join("settings.json");
 
-        let settings = AppSettings { last_instance: Some(PathBuf::from("/some/instance")) };
+        let settings = AppSettings {
+            last_instance: Some(PathBuf::from("/some/instance")),
+        };
         settings.save_to(path.clone()).unwrap();
 
         let loaded = AppSettings::load_from(Some(&path));

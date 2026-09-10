@@ -26,11 +26,20 @@ impl Changeset {
     /// Records an edit. If this property was already recorded, only its `new_value` is
     /// updated - `original_value` always reflects the value from before *any* edit in this
     /// changeset, not just the most recent one.
-    pub fn record(&mut self, path: PropertyPath, original_value: PropertyValue, new_value: PropertyValue) {
+    pub fn record(
+        &mut self,
+        path: PropertyPath,
+        original_value: PropertyValue,
+        new_value: PropertyValue,
+    ) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.path == path) {
             entry.new_value = new_value;
         } else {
-            self.entries.push(ChangesetEntry { path, original_value, new_value });
+            self.entries.push(ChangesetEntry {
+                path,
+                original_value,
+                new_value,
+            });
         }
     }
 
@@ -80,7 +89,11 @@ mod tests {
         let ast = forge_cfg::parse("modules {\n    B:Flag=true\n    B:Other=true\n}\n").unwrap();
         let mut store = ConfigStore {
             minecraft_dir: PathBuf::new(),
-            files: vec![ConfigFileEntry { relative_path: PathBuf::from("thing.cfg"), ast, dirty: false }],
+            files: vec![ConfigFileEntry {
+                relative_path: PathBuf::from("thing.cfg"),
+                ast,
+                dirty: false,
+            }],
         };
 
         let mut changeset = Changeset::default();
@@ -112,14 +125,20 @@ mod tests {
             category_path: vec!["modules".to_string()],
             property_name: "Flag".to_string(),
         });
-        assert_eq!(flag.unwrap().value, PropertyValue::Single("false".to_string()));
+        assert_eq!(
+            flag.unwrap().value,
+            PropertyValue::Single("false".to_string())
+        );
 
         let other = store.get_property(&PropertyPath {
             relative_path: PathBuf::from("thing.cfg"),
             category_path: vec!["modules".to_string()],
             property_name: "Other".to_string(),
         });
-        assert_eq!(other.unwrap().value, PropertyValue::Single("true".to_string()));
+        assert_eq!(
+            other.unwrap().value,
+            PropertyValue::Single("true".to_string())
+        );
     }
 
     #[test]
@@ -127,7 +146,11 @@ mod tests {
         let ast = forge_cfg::parse("modules {\n    B:Flag=true\n}\n").unwrap();
         let mut store = ConfigStore {
             minecraft_dir: PathBuf::new(),
-            files: vec![ConfigFileEntry { relative_path: PathBuf::from("thing.cfg"), ast, dirty: false }],
+            files: vec![ConfigFileEntry {
+                relative_path: PathBuf::from("thing.cfg"),
+                ast,
+                dirty: false,
+            }],
         };
         let path = PropertyPath {
             relative_path: PathBuf::from("thing.cfg"),
@@ -142,11 +165,17 @@ mod tests {
             PropertyValue::Single("false".to_string()),
         );
         changeset.apply(&mut store);
-        assert_eq!(store.get_property(&path).unwrap().value, PropertyValue::Single("false".to_string()));
+        assert_eq!(
+            store.get_property(&path).unwrap().value,
+            PropertyValue::Single("false".to_string())
+        );
 
         let unresolved = changeset.revert(&mut store);
         assert!(unresolved.is_empty());
-        assert_eq!(store.get_property(&path).unwrap().value, PropertyValue::Single("true".to_string()));
+        assert_eq!(
+            store.get_property(&path).unwrap().value,
+            PropertyValue::Single("true".to_string())
+        );
     }
 
     #[test]
@@ -189,7 +218,13 @@ mod tests {
         );
 
         assert_eq!(changeset.entries.len(), 1);
-        assert_eq!(changeset.entries[0].original_value, PropertyValue::Single("true".to_string()));
-        assert_eq!(changeset.entries[0].new_value, PropertyValue::Single("maybe".to_string()));
+        assert_eq!(
+            changeset.entries[0].original_value,
+            PropertyValue::Single("true".to_string())
+        );
+        assert_eq!(
+            changeset.entries[0].new_value,
+            PropertyValue::Single("maybe".to_string())
+        );
     }
 }

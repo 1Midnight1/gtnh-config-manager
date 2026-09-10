@@ -56,31 +56,57 @@ impl ConfigStore {
             let absolute_path = minecraft_dir.join(&relative_path);
             match std::fs::read_to_string(&absolute_path).map_err(|err| err.to_string()) {
                 Ok(contents) => match forge_cfg::parse(&contents) {
-                    Ok(ast) => files.push(ConfigFileEntry { relative_path, ast, dirty: false }),
-                    Err(err) => errors.push(LoadError { relative_path, message: err.to_string() }),
+                    Ok(ast) => files.push(ConfigFileEntry {
+                        relative_path,
+                        ast,
+                        dirty: false,
+                    }),
+                    Err(err) => errors.push(LoadError {
+                        relative_path,
+                        message: err.to_string(),
+                    }),
                 },
-                Err(message) => errors.push(LoadError { relative_path, message }),
+                Err(message) => errors.push(LoadError {
+                    relative_path,
+                    message,
+                }),
             }
         }
 
         files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-        (ConfigStore { minecraft_dir: minecraft_dir.to_path_buf(), files }, errors)
+        (
+            ConfigStore {
+                minecraft_dir: minecraft_dir.to_path_buf(),
+                files,
+            },
+            errors,
+        )
     }
 
     pub fn get_property(&self, path: &PropertyPath) -> Option<&Property> {
-        let entry = self.files.iter().find(|entry| entry.relative_path == path.relative_path)?;
+        let entry = self
+            .files
+            .iter()
+            .find(|entry| entry.relative_path == path.relative_path)?;
         find_property(&entry.ast.items, &path.category_path, &path.property_name)
     }
 
     /// Sets a property's value in memory and marks its file dirty. Returns false if the path
     /// no longer resolves to an existing property (e.g. the file changed on disk since loading).
     pub fn set_property_value(&mut self, path: &PropertyPath, value: PropertyValue) -> bool {
-        let Some(entry) = self.files.iter_mut().find(|entry| entry.relative_path == path.relative_path) else {
+        let Some(entry) = self
+            .files
+            .iter_mut()
+            .find(|entry| entry.relative_path == path.relative_path)
+        else {
             return false;
         };
-        let Some(property) = find_property_mut(&mut entry.ast.items, &path.category_path, &path.property_name)
-        else {
+        let Some(property) = find_property_mut(
+            &mut entry.ast.items,
+            &path.category_path,
+            &path.property_name,
+        ) else {
             return false;
         };
         property.value = value;
@@ -98,9 +124,10 @@ impl ConfigStore {
             let absolute_path = self.minecraft_dir.join(&entry.relative_path);
             match std::fs::write(&absolute_path, entry.ast.to_string()) {
                 Ok(()) => entry.dirty = false,
-                Err(err) => {
-                    errors.push(LoadError { relative_path: entry.relative_path.clone(), message: err.to_string() })
-                }
+                Err(err) => errors.push(LoadError {
+                    relative_path: entry.relative_path.clone(),
+                    message: err.to_string(),
+                }),
             }
         }
         errors
@@ -111,7 +138,11 @@ impl ConfigStore {
     }
 }
 
-fn find_property<'a>(items: &'a [Item], category_path: &[String], name: &str) -> Option<&'a Property> {
+fn find_property<'a>(
+    items: &'a [Item],
+    category_path: &[String],
+    name: &str,
+) -> Option<&'a Property> {
     let items = descend(items, category_path)?;
     items.iter().find_map(|item| match item {
         Item::Property(property) if property.name == name => Some(property),
@@ -119,7 +150,11 @@ fn find_property<'a>(items: &'a [Item], category_path: &[String], name: &str) ->
     })
 }
 
-fn find_property_mut<'a>(items: &'a mut [Item], category_path: &[String], name: &str) -> Option<&'a mut Property> {
+fn find_property_mut<'a>(
+    items: &'a mut [Item],
+    category_path: &[String],
+    name: &str,
+) -> Option<&'a mut Property> {
     let items = descend_mut(items, category_path)?;
     items.iter_mut().find_map(|item| match item {
         Item::Property(property) if property.name == name => Some(property),
@@ -153,7 +188,10 @@ fn descend_mut<'a>(mut items: &'a mut [Item], category_path: &[String]) -> Optio
 fn discover_cfg_files(minecraft_dir: &Path) -> Vec<PathBuf> {
     let mut relative_paths = Vec::new();
     for root in SCAN_ROOTS {
-        relative_paths.extend(discover_cfg_files_in_root(&minecraft_dir.join(root), Path::new(root)));
+        relative_paths.extend(discover_cfg_files_in_root(
+            &minecraft_dir.join(root),
+            Path::new(root),
+        ));
     }
     relative_paths
 }
@@ -193,7 +231,8 @@ fn discover_cfg_files_in_root(root_dir: &Path, relative_root: &Path) -> Vec<Path
 }
 
 fn is_cfg_file(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("cfg"))
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cfg"))
 }
 
 #[cfg(test)]
@@ -211,7 +250,11 @@ mod tests {
     #[test]
     fn loads_and_edits_a_property() {
         let dir = std::env::temp_dir().join(format!("gtnh-cfg-test-{}", std::process::id()));
-        write(&dir, "config/modules/thing.cfg", "modules {\n    B:Flag=true\n}\n");
+        write(
+            &dir,
+            "config/modules/thing.cfg",
+            "modules {\n    B:Flag=true\n}\n",
+        );
 
         let (mut store, errors) = ConfigStore::load(&dir);
         assert!(errors.is_empty());
@@ -221,10 +264,16 @@ mod tests {
             category_path: vec!["modules".to_string()],
             property_name: "Flag".to_string(),
         };
-        assert_eq!(store.get_property(&path).unwrap().value, PropertyValue::Single("true".to_string()));
+        assert_eq!(
+            store.get_property(&path).unwrap().value,
+            PropertyValue::Single("true".to_string())
+        );
 
         assert!(store.set_property_value(&path, PropertyValue::Single("false".to_string())));
-        assert_eq!(store.get_property(&path).unwrap().value, PropertyValue::Single("false".to_string()));
+        assert_eq!(
+            store.get_property(&path).unwrap().value,
+            PropertyValue::Single("false".to_string())
+        );
         assert!(store.has_unsaved_changes());
 
         assert!(store.save_dirty().is_empty());
@@ -239,14 +288,30 @@ mod tests {
     #[test]
     fn also_discovers_serverutilities_configs() {
         let dir = std::env::temp_dir().join(format!("gtnh-cfg-test-su-{}", std::process::id()));
-        write(&dir, "config/modules/thing.cfg", "modules {\n    B:Flag=true\n}\n");
-        write(&dir, "serverutilities/su.cfg", "su {\n    B:Enabled=true\n}\n");
-        write(&dir, "serverutilities/sub/nested.cfg", "sub {\n    B:Nested=true\n}\n");
+        write(
+            &dir,
+            "config/modules/thing.cfg",
+            "modules {\n    B:Flag=true\n}\n",
+        );
+        write(
+            &dir,
+            "serverutilities/su.cfg",
+            "su {\n    B:Enabled=true\n}\n",
+        );
+        write(
+            &dir,
+            "serverutilities/sub/nested.cfg",
+            "sub {\n    B:Nested=true\n}\n",
+        );
 
         let (store, errors) = ConfigStore::load(&dir);
         assert!(errors.is_empty());
 
-        let relative_paths: Vec<_> = store.files.iter().map(|entry| entry.relative_path.clone()).collect();
+        let relative_paths: Vec<_> = store
+            .files
+            .iter()
+            .map(|entry| entry.relative_path.clone())
+            .collect();
         assert!(relative_paths.contains(&PathBuf::from("config/modules/thing.cfg")));
         assert!(relative_paths.contains(&PathBuf::from("serverutilities/su.cfg")));
         assert!(relative_paths.contains(&PathBuf::from("serverutilities/sub/nested.cfg")));

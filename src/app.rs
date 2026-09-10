@@ -89,7 +89,10 @@ pub enum Message {
 pub fn boot() -> (State, Task<Message>) {
     let settings_task = Task::perform(load_settings(), Message::SettingsLoaded);
     let profiles_task = Task::perform(load_profile_store(), Message::ProfileStoreLoaded);
-    (State::default(), Task::batch([settings_task, profiles_task]))
+    (
+        State::default(),
+        Task::batch([settings_task, profiles_task]),
+    )
 }
 
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
@@ -110,13 +113,18 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::PickFolder => {
-            let starting_dir =
-                state.instance_path.as_deref().and_then(|path| path.parent()).map(|parent| parent.to_path_buf());
+            let starting_dir = state
+                .instance_path
+                .as_deref()
+                .and_then(|path| path.parent())
+                .map(|parent| parent.to_path_buf());
             Task::perform(pick_folder(starting_dir), Message::FolderPicked)
         }
         Message::FolderPicked(Some(path)) => {
             let load_task = start_loading_configs(state, path.clone());
-            let settings = AppSettings { last_instance: Some(path) };
+            let settings = AppSettings {
+                last_instance: Some(path),
+            };
             let save_task = Task::perform(save_settings(settings), |()| Message::SettingsSaved);
             Task::batch([load_task, save_task])
         }
@@ -127,7 +135,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             // JSON, ChickenBones' older format, etc). Those are expected to fail here and are
             // simply left unmanaged rather than treated as corruption.
             if !errors.is_empty() {
-                status_parts.push(format!("{} config file(s) use an unsupported format and were skipped", errors.len()));
+                status_parts.push(format!(
+                    "{} config file(s) use an unsupported format and were skipped",
+                    errors.len()
+                ));
             }
 
             // A profile must always be selected - fall back to an existing one, or create an
@@ -135,10 +146,16 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut created_default = false;
             if state.selected_profile.is_none() {
                 if state.profile_store.profiles.is_empty() {
-                    state.profile_store.upsert("Default".to_string(), Changeset::default());
+                    state
+                        .profile_store
+                        .upsert("Default".to_string(), Changeset::default());
                     created_default = true;
                 }
-                state.selected_profile = state.profile_store.profiles.first().map(|profile| profile.name.clone());
+                state.selected_profile = state
+                    .profile_store
+                    .profiles
+                    .first()
+                    .map(|profile| profile.name.clone());
             }
 
             let active_changeset = state
@@ -150,7 +167,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
             let unresolved = active_changeset.apply(&mut store);
             if !unresolved.is_empty() {
-                status_parts.push(format!("{} edit(s) in the selected profile no longer apply", unresolved.len()));
+                status_parts.push(format!(
+                    "{} edit(s) in the selected profile no longer apply",
+                    unresolved.len()
+                ));
             }
             state.changeset = active_changeset;
             state.profile_dirty = false;
@@ -160,7 +180,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.status = (!status_parts.is_empty()).then(|| status_parts.join("; "));
 
             if created_default {
-                Task::perform(save_profile_store(state.profile_store.clone()), Message::ProfileStoreSaved)
+                Task::perform(
+                    save_profile_store(state.profile_store.clone()),
+                    Message::ProfileStoreSaved,
+                )
             } else {
                 Task::none()
             }
@@ -176,7 +199,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::PropertyEdited(path, value) => {
             let new_value = PropertyValue::Single(value);
             if let Some(store) = &mut state.store {
-                let original_value = store.get_property(&path).map(|property| property.value.clone());
+                let original_value = store
+                    .get_property(&path)
+                    .map(|property| property.value.clone());
                 if let Some(original_value) = original_value {
                     if store.set_property_value(&path, new_value.clone()) {
                         state.index.update_value(&path, &new_value);
@@ -193,15 +218,20 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 return Task::none();
             }
             if state.profile_dirty {
-                state.dialog = Dialog::UnsavedChanges { pending: PendingAction::SwitchProfile(name) };
+                state.dialog = Dialog::UnsavedChanges {
+                    pending: PendingAction::SwitchProfile(name),
+                };
             } else {
                 switch_to_profile(state, &name);
             }
             Task::none()
         }
         Message::ViewProfile(name) => {
-            state.viewing_profile =
-                if state.viewing_profile.as_deref() == Some(name.as_str()) { None } else { Some(name) };
+            state.viewing_profile = if state.viewing_profile.as_deref() == Some(name.as_str()) {
+                None
+            } else {
+                Some(name)
+            };
             Task::none()
         }
         Message::NewProfileRequested => {
@@ -210,9 +240,14 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 return Task::none();
             }
             if state.profile_dirty {
-                state.dialog = Dialog::UnsavedChanges { pending: PendingAction::NewProfile };
+                state.dialog = Dialog::UnsavedChanges {
+                    pending: PendingAction::NewProfile,
+                };
             } else {
-                state.dialog = Dialog::NewProfile { name: String::new(), error: None };
+                state.dialog = Dialog::NewProfile {
+                    name: String::new(),
+                    error: None,
+                };
             }
             Task::none()
         }
@@ -246,7 +281,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.changeset.clone()
             };
 
-            state.profile_store.upsert(name.clone(), new_changeset.clone());
+            state
+                .profile_store
+                .upsert(name.clone(), new_changeset.clone());
             state.selected_profile = Some(name);
             state.changeset = new_changeset;
             state.profile_dirty = false;
@@ -255,14 +292,18 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.index = SearchIndex::build(store);
             }
 
-            Task::perform(save_profile_store(state.profile_store.clone()), Message::ProfileStoreSaved)
+            Task::perform(
+                save_profile_store(state.profile_store.clone()),
+                Message::ProfileStoreSaved,
+            )
         }
         Message::DeleteProfileRequested(name) => {
             state.dialog = Dialog::ConfirmDelete { name };
             Task::none()
         }
         Message::ConfirmDeleteProfile => {
-            let Dialog::ConfirmDelete { name } = std::mem::replace(&mut state.dialog, Dialog::None) else {
+            let Dialog::ConfirmDelete { name } = std::mem::replace(&mut state.dialog, Dialog::None)
+            else {
                 return Task::none();
             };
             state.profile_store.remove(&name);
@@ -273,14 +314,24 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             if state.selected_profile.as_deref() == Some(name.as_str()) {
                 state.selected_profile = None;
                 if state.profile_store.profiles.is_empty() {
-                    state.profile_store.upsert("Default".to_string(), Changeset::default());
+                    state
+                        .profile_store
+                        .upsert("Default".to_string(), Changeset::default());
                 }
-                if let Some(fallback) = state.profile_store.profiles.first().map(|profile| profile.name.clone()) {
+                if let Some(fallback) = state
+                    .profile_store
+                    .profiles
+                    .first()
+                    .map(|profile| profile.name.clone())
+                {
                     switch_to_profile(state, &fallback);
                 }
             }
 
-            Task::perform(save_profile_store(state.profile_store.clone()), Message::ProfileStoreSaved)
+            Task::perform(
+                save_profile_store(state.profile_store.clone()),
+                Message::ProfileStoreSaved,
+            )
         }
         Message::CancelDialog => {
             state.dialog = Dialog::None;
@@ -304,13 +355,17 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 /// Resolves whatever action was deferred behind the "unsaved changes" dialog: either switching
 /// to the target profile, or opening the "new profile" dialog with a clean slate.
 fn resolve_pending_dialog_action(state: &mut State) -> Task<Message> {
-    let Dialog::UnsavedChanges { pending } = std::mem::replace(&mut state.dialog, Dialog::None) else {
+    let Dialog::UnsavedChanges { pending } = std::mem::replace(&mut state.dialog, Dialog::None)
+    else {
         return Task::none();
     };
     match pending {
         PendingAction::SwitchProfile(name) => switch_to_profile(state, &name),
         PendingAction::NewProfile => {
-            state.dialog = Dialog::NewProfile { name: String::new(), error: None };
+            state.dialog = Dialog::NewProfile {
+                name: String::new(),
+                error: None,
+            };
         }
     }
     Task::none()
@@ -339,25 +394,38 @@ fn persist_current_changeset(state: &mut State) -> Task<Message> {
     };
     state.profile_store.upsert(name, state.changeset.clone());
     state.profile_dirty = false;
-    Task::perform(save_profile_store(state.profile_store.clone()), Message::ProfileStoreSaved)
+    Task::perform(
+        save_profile_store(state.profile_store.clone()),
+        Message::ProfileStoreSaved,
+    )
 }
 
 /// Synchronously resets the loaded config store from whatever `changeset` currently reflects
 /// to `name`'s saved state, by reverting the former and re-applying the latter in memory - no
 /// disk re-read needed, since `original_value`s already capture the true on-disk values.
 fn switch_to_profile(state: &mut State, name: &str) {
-    let Some(store) = &mut state.store else { return };
+    let Some(store) = &mut state.store else {
+        return;
+    };
 
     state.changeset.revert(store);
-    let target = state.profile_store.get(name).map(|profile| profile.changeset.clone()).unwrap_or_default();
+    let target = state
+        .profile_store
+        .get(name)
+        .map(|profile| profile.changeset.clone())
+        .unwrap_or_default();
     let unresolved = target.apply(store);
 
     state.changeset = target;
     state.selected_profile = Some(name.to_string());
     state.profile_dirty = false;
     state.index = SearchIndex::build(store);
-    state.status =
-        (!unresolved.is_empty()).then(|| format!("{} edit(s) in this profile no longer apply", unresolved.len()));
+    state.status = (!unresolved.is_empty()).then(|| {
+        format!(
+            "{} edit(s) in this profile no longer apply",
+            unresolved.len()
+        )
+    });
 }
 
 fn start_loading_configs(state: &mut State, instance_path: PathBuf) -> Task<Message> {
@@ -384,8 +452,12 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let new_profile_button = button("New profile...").on_press(Message::NewProfileRequested);
 
     let mut content = column![
-        row![button("Select modpack folder").on_press(Message::PickFolder), save_button, new_profile_button]
-            .spacing(10),
+        row![
+            button("Select modpack folder").on_press(Message::PickFolder),
+            save_button,
+            new_profile_button
+        ]
+        .spacing(10),
         path_label,
         profiles_panel(state),
         text_input("Search configs...", &state.search_query).on_input(Message::SearchChanged),
@@ -399,13 +471,19 @@ pub fn view(state: &State) -> Element<'_, Message> {
 
     let matches = state.index.filter(&state.search_query);
     let total = matches.len();
-    let rows: Vec<Element<'_, Message>> =
-        matches.into_iter().take(MAX_VISIBLE_RESULTS).map(property_row).collect();
+    let rows: Vec<Element<'_, Message>> = matches
+        .into_iter()
+        .take(MAX_VISIBLE_RESULTS)
+        .map(property_row)
+        .collect();
 
     content = content.push(scrollable(column(rows).spacing(6)).height(Length::Fill));
 
     if total > MAX_VISIBLE_RESULTS {
-        content = content.push(text(format!("{} more result(s) not shown - refine your search", total - MAX_VISIBLE_RESULTS)));
+        content = content.push(text(format!(
+            "{} more result(s) not shown - refine your search",
+            total - MAX_VISIBLE_RESULTS
+        )));
     }
 
     container(content).into()
@@ -442,8 +520,11 @@ fn dialog_view(state: &State) -> Element<'_, Message> {
             dialog
                 .push(
                     row![
-                        button("Start from current profile").on_press(Message::CreateNewProfile { from_scratch: false }),
-                        button("Start from scratch").on_press(Message::CreateNewProfile { from_scratch: true }),
+                        button("Start from current profile").on_press(Message::CreateNewProfile {
+                            from_scratch: false
+                        }),
+                        button("Start from scratch")
+                            .on_press(Message::CreateNewProfile { from_scratch: true }),
                         button("Cancel").on_press(Message::CancelDialog),
                     ]
                     .spacing(10),
@@ -471,15 +552,22 @@ fn profiles_panel(state: &State) -> Element<'_, Message> {
     for profile in &state.profile_store.profiles {
         let is_selected = state.selected_profile.as_deref() == Some(profile.name.as_str());
         let is_viewing = state.viewing_profile.as_deref() == Some(profile.name.as_str());
-        let label = if is_selected { format!("* {} (selected)", profile.name) } else { profile.name.clone() };
+        let label = if is_selected {
+            format!("* {} (selected)", profile.name)
+        } else {
+            profile.name.clone()
+        };
 
         panel = panel.push(
             row![
                 text(label).width(Length::FillPortion(2)),
-                text(format!("{} change(s)", profile.changeset.entries.len())).width(Length::FillPortion(1)),
-                button("Select")
-                    .on_press_maybe((!is_selected).then(|| Message::SelectProfileRequested(profile.name.clone()))),
-                button(if is_viewing { "Hide" } else { "View" }).on_press(Message::ViewProfile(profile.name.clone())),
+                text(format!("{} change(s)", profile.changeset.entries.len()))
+                    .width(Length::FillPortion(1)),
+                button("Select").on_press_maybe(
+                    (!is_selected).then(|| Message::SelectProfileRequested(profile.name.clone()))
+                ),
+                button(if is_viewing { "Hide" } else { "View" })
+                    .on_press(Message::ViewProfile(profile.name.clone())),
                 button("Delete").on_press(Message::DeleteProfileRequested(profile.name.clone())),
             ]
             .spacing(10),
@@ -549,12 +637,18 @@ async fn pick_folder(starting_dir: Option<PathBuf>) -> Option<PathBuf> {
         dialog = dialog.set_directory(dir);
     }
 
-    dialog.pick_folder().await.map(|handle| handle.path().to_path_buf())
+    dialog
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
 }
 
 async fn load_configs(minecraft_dir: PathBuf) -> Result<(ConfigStore, Vec<LoadError>), String> {
     if !minecraft_dir.is_dir() {
-        return Err(format!("{} does not exist - is this a GTNH instance folder?", minecraft_dir.display()));
+        return Err(format!(
+            "{} does not exist - is this a GTNH instance folder?",
+            minecraft_dir.display()
+        ));
     }
     Ok(ConfigStore::load(&minecraft_dir))
 }
