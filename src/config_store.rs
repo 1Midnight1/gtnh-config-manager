@@ -92,6 +92,16 @@ impl ConfigStore {
         find_property(&entry.ast.items, &path.category_path, &path.property_name)
     }
 
+    /// The items directly inside `category_path` of `file` (the file's top level when the path
+    /// is empty), or `None` if the file or category doesn't exist.
+    pub fn items_at(&self, file: &Path, category_path: &[String]) -> Option<&[Item]> {
+        let entry = self
+            .files
+            .iter()
+            .find(|entry| entry.relative_path == file)?;
+        descend(&entry.ast.items, category_path)
+    }
+
     /// Sets a property's value in memory and marks its file dirty. Returns false if the path
     /// no longer resolves to an existing property (e.g. the file changed on disk since loading).
     pub fn set_property_value(&mut self, path: &PropertyPath, value: PropertyValue) -> bool {
@@ -275,6 +285,17 @@ mod tests {
             PropertyValue::Single("false".to_string())
         );
         assert!(store.has_unsaved_changes());
+
+        let file = Path::new("config/modules/thing.cfg");
+        assert_eq!(
+            store
+                .items_at(file, &["modules".to_string()])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(store.items_at(file, &[]).unwrap().len(), 1);
+        assert!(store.items_at(file, &["missing".to_string()]).is_none());
 
         assert!(store.save_dirty().is_empty());
         assert!(!store.has_unsaved_changes());

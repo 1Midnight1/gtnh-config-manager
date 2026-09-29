@@ -1,6 +1,7 @@
 //! Manages named, persisted profiles (each wrapping a `Changeset`) so the program - not the
 //! user - is responsible for where they live on disk. Mirrors `settings.rs`'s load/save pattern.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,10 @@ use crate::changeset::Changeset;
 pub struct Profile {
     pub name: String,
     pub changeset: Changeset,
+    /// Verbatim contents of whole files (see `tracked_files`), keyed by path relative to
+    /// `.minecraft`. Defaulted so profiles saved before this field existed still load.
+    #[serde(default)]
+    pub tracked_files: BTreeMap<PathBuf, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -52,7 +57,8 @@ impl ProfileStore {
         std::fs::write(path, contents)
     }
 
-    /// Creates a new profile, or overwrites the changeset of an existing one with the same name.
+    /// Creates a new profile, or overwrites the changeset of an existing one with the same name
+    /// (leaving its tracked files untouched).
     pub fn upsert(&mut self, name: String, changeset: Changeset) {
         if let Some(existing) = self
             .profiles
@@ -61,7 +67,23 @@ impl ProfileStore {
         {
             existing.changeset = changeset;
         } else {
-            self.profiles.push(Profile { name, changeset });
+            self.profiles.push(Profile {
+                name,
+                changeset,
+                tracked_files: BTreeMap::new(),
+            });
+        }
+    }
+
+    /// Replaces the stored tracked files of an existing profile. Does nothing if `name` doesn't
+    /// exist.
+    pub fn set_tracked_files(&mut self, name: &str, files: BTreeMap<PathBuf, String>) {
+        if let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == name)
+        {
+            profile.tracked_files = files;
         }
     }
 
@@ -113,6 +135,23 @@ mod tests {
 
         assert_eq!(store.profiles.len(), 1);
         assert_eq!(store.get("A").unwrap().changeset, second);
+    }
+
+    #[test]
+    fn upsert_keeps_tracked_files() {
+        let mut store = ProfileStore::default();
+        store.upsert("A".to_string(), Changeset::default());
+        let files = BTreeMap::from([(PathBuf::from("ranks.txt"), "contents".to_string())]);
+        store.set_tracked_files("A", files.clone());
+        store.upsert("A".to_string(), Changeset::default());
+        assert_eq!(store.get("A").unwrap().tracked_files, files);
+    }
+
+    #[test]
+    fn loads_profiles_saved_without_tracked_files() {
+        let json = r#"{"profiles":[{"name":"Old","changeset":{"entries":[]}}]}"#;
+        let store: ProfileStore = serde_json::from_str(json).unwrap();
+        assert!(store.get("Old").unwrap().tracked_files.is_empty());
     }
 
     #[test]

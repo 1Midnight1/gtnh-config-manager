@@ -5,12 +5,13 @@ use std::path::Path;
 
 use crate::config_store::{ConfigStore, PropertyPath};
 use crate::forge_cfg::{Item, PropertyValue};
+use crate::tree;
 
 #[derive(Debug, Clone)]
 pub struct IndexedProperty {
     pub path: PropertyPath,
     pub display_value: String,
-    /// Lowercased "file category name value" blob used for substring matching.
+    /// Lowercased "mod file category name value" blob used for substring matching.
     haystack: String,
 }
 
@@ -48,14 +49,7 @@ impl SearchIndex {
             return;
         };
         entry.display_value = display_value(value);
-        entry.haystack = format!(
-            "{} {} {} {}",
-            path.relative_path.display(),
-            path.category_path.join("/"),
-            path.property_name,
-            entry.display_value
-        )
-        .to_lowercase();
+        entry.haystack = haystack(path, &entry.display_value);
     }
 }
 
@@ -68,21 +62,15 @@ fn collect(
     for item in items {
         match item {
             Item::Property(property) => {
+                let path = PropertyPath {
+                    relative_path: relative_path.to_path_buf(),
+                    category_path: category_path.to_vec(),
+                    property_name: property.name.clone(),
+                };
                 let display_value = display_value(&property.value);
-                let haystack = format!(
-                    "{} {} {} {display_value}",
-                    relative_path.display(),
-                    category_path.join("/"),
-                    property.name,
-                )
-                .to_lowercase();
-
+                let haystack = haystack(&path, &display_value);
                 out.push(IndexedProperty {
-                    path: PropertyPath {
-                        relative_path: relative_path.to_path_buf(),
-                        category_path: category_path.to_vec(),
-                        property_name: property.name.clone(),
-                    },
+                    path,
                     display_value,
                     haystack,
                 });
@@ -94,6 +82,17 @@ fn collect(
             }
         }
     }
+}
+
+fn haystack(path: &PropertyPath, display_value: &str) -> String {
+    format!(
+        "{} {} {} {} {display_value}",
+        tree::mod_display_name(&path.relative_path),
+        path.relative_path.display(),
+        path.category_path.join("/"),
+        path.property_name,
+    )
+    .to_lowercase()
 }
 
 pub fn display_value(value: &PropertyValue) -> String {
@@ -138,6 +137,7 @@ mod tests {
         assert_eq!(matches[0].path.property_name, "Other");
 
         assert_eq!(index.filter("").len(), 2);
+        assert_eq!(index.filter("thing").len(), 2);
         assert_eq!(index.filter("nonexistent").len(), 0);
     }
 }
