@@ -7,6 +7,9 @@
 //! existing files, so no newer chunks survive. Before anything is touched, the current contents
 //! of those same roots are saved as a new backup in the same format, so a restore can itself be
 //! undone by restoring that safety backup.
+//!
+//! Migrating a save to another instance is the same operation across two `.minecraft` folders:
+//! the world's folders are zipped into a temporary backup, which is then restored into the target.
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -16,7 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::config_store::{ConfigStore, PropertyPath};
+use crate::config_store::{ConfigFileEntry, ConfigStore, PropertyPath};
 use crate::forge_cfg::PropertyValue;
 
 const DEFAULT_BACKUP_FOLDER: &str = "./backups/";
@@ -24,6 +27,15 @@ const DEFAULT_BACKUP_FOLDER: &str = "./backups/";
 /// the selected backup is fully extracted into before any existing data is removed.
 const STAGING_DIR: &str = ".gtnh-restore-staging";
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%d-%H-%M-%S";
+/// Folder inside the target's `.minecraft` holding the temporary backup a migration restores.
+const MIGRATE_DIR: &str = ".gtnh-migrate";
+/// Where a restore moves the folders it replaces until every new one is in place. Only deleted
+/// after a successful swap, so a leftover one may hold the only copy of a world.
+const PREVIOUS_DIR: &str = ".gtnh-restore-previous";
+const SERVERUTILITIES_CFG: &str = "serverutilities/serverutilities.cfg";
+/// How deep below `.minecraft` `world_roots` looks for world-named folders - deep enough for
+/// `journeymap/data/sp/<world>` and `visualprospecting/client/<uuid>/<world>_<uuid>`.
+const WORLD_ROOT_MAX_DEPTH: usize = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackupInfo {
@@ -46,7 +58,7 @@ pub struct RestoreReport {
 /// `serverutilities/serverutilities.cfg`), falling back to its default of `./backups/`.
 pub fn backups_dir(store: &ConfigStore) -> PathBuf {
     let path = PropertyPath {
-        relative_path: PathBuf::from("serverutilities/serverutilities.cfg"),
+        relative_path: PathBuf::from(SERVERUTILITIES_CFG),
         category_path: vec!["backups".to_string()],
         property_name: "backup_folder_path".to_string(),
     };
@@ -55,6 +67,81 @@ pub fn backups_dir(store: &ConfigStore) -> PathBuf {
         _ => DEFAULT_BACKUP_FOLDER,
     };
     store.minecraft_dir.join(configured)
+}
+
+/// `backups_dir` for an instance that isn't loaded, reading only `serverutilities.cfg`.
+pub fn backups_dir_in(minecraft_dir: &Path) -> PathBuf {
+    let files = std::fs::read_to_string(minecraft_dir.join(SERVERUTILITIES_CFG))
+        .ok()
+        .and_then(|contents| ConfigFileEntry::parse(SERVERUTILITIES_CFG.into(), contents).ok())
+        .into_iter()
+        .collect();
+    backups_dir(&ConfigStore {
+        minecraft_dir: minecraft_dir.to_path_buf(),
+        files,
+    })
+}
+
+/// Names of the worlds in `saves/` (folders containing a `level.dat`), sorted.
+pub fn list_saves(minecraft_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(minecraft_dir.join("saves")) else {
+        return Vec::new();
+    };
+    let mut saves: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().join("level.dat").is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    saves.sort();
+    saves
+}
+
+/// Copies `world` from `source_minecraft` into `target_minecraft`, exactly as if a backup of it
+/// had been restored there: its folders are zipped into a temporary backup inside the target,
+/// which is then restored (so the target's previous copy is saved in its own backups folder).
+/// The source is only read.
+pub fn migrate(
+    source_minecraft: &Path,
+    world: &str,
+    target_minecraft: &Path,
+) -> Result<RestoreReport, String> {
+    if !target_minecraft.is_dir() {
+        return Err(format!("{} does not exist", target_minecraft.display()));
+    }
+    if same_dir(source_minecraft, target_minecraft) {
+        return Err("The target is the instance the save is already in.".to_string());
+    }
+
+    let roots = world_roots(source_minecraft, world);
+    if !roots.contains(&Path::new("saves").join(world)) {
+        return Err(format!("Save \"{world}\" was not found"));
+    }
+
+    let temp = target_minecraft.join(MIGRATE_DIR);
+    let result = create_backup(source_minecraft, &temp, &roots, world)
+        .map_err(|err| format!("Failed to copy \"{world}\", nothing was migrated: {err}"))
+        .and_then(|path| {
+            let backup = BackupInfo {
+                name: path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                world: Some(world.to_string()),
+                size: std::fs::metadata(&path).map_or(0, |metadata| metadata.len()),
+                path,
+            };
+            restore(target_minecraft, &backups_dir_in(target_minecraft), &backup)
+        });
+    let _ = std::fs::remove_dir_all(&temp);
+    result
+}
+
+/// Whether two paths are the same folder, comparing canonical forms when both exist.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Returns every `yyyy-mm-dd-hh-mm-ss.zip` file directly inside `dir`, newest first.
@@ -106,12 +193,18 @@ pub fn restore(
     backups_dir: &Path,
     backup: &BackupInfo,
 ) -> Result<RestoreReport, String> {
-    let open = || -> Result<ZipArchive<BufReader<File>>, String> {
-        let file = File::open(&backup.path).map_err(|err| format!("{}: {err}", backup.name))?;
-        ZipArchive::new(BufReader::new(file)).map_err(|err| format!("{}: {err}", backup.name))
-    };
+    let previous = minecraft_dir.join(PREVIOUS_DIR);
+    if previous.exists() {
+        return Err(format!(
+            "An earlier restore left {} behind, which may hold world data. Move or delete it, \
+             then try again.",
+            previous.display()
+        ));
+    }
 
-    let mut archive = open()?;
+    let mut archive = File::open(&backup.path)
+        .and_then(|file| ZipArchive::new(BufReader::new(file)).map_err(io::Error::other))
+        .map_err(|err| format!("{}: {err}", backup.name))?;
     let (entries, prefix) = entry_paths(&mut archive, &backup.name)?;
     let world = world_from_comment(archive.comment())
         .or_else(|| world_from_entries(&entries))
@@ -135,15 +228,19 @@ pub fn restore(
             )
         })
         .and_then(|()| {
-            swap_in_roots(minecraft_dir, &staging, &roots).map_err(|err| {
+            swap_in_roots(minecraft_dir, &staging, &previous, &roots).map_err(|err| {
                 format!(
-                    "Restore failed partway through ({err}); the previous state is saved in {}",
+                    "Restore failed and was undone ({err}); nothing was changed. The previous \
+                     state is also saved in {}",
                     safety_backup.display()
                 )
             })
         });
     let _ = std::fs::remove_dir_all(&staging);
     result?;
+    // Everything in it is also in the safety backup; if it can't be deleted now (e.g. a locked
+    // file on Windows) the next restore asks the user to remove it.
+    let _ = std::fs::remove_dir_all(&previous);
 
     Ok(RestoreReport {
         safety_backup,
@@ -250,6 +347,70 @@ fn restore_roots(entries: &[PathBuf], world: &str) -> BTreeSet<PathBuf> {
     roots
 }
 
+/// The on-disk counterpart of `restore_roots`: every folder (below the top level, at most
+/// `WORLD_ROOT_MAX_DEPTH` deep) named `world` or `<world>_*`, which is where mods keep
+/// per-world data. Directly inside `saves/` only `world` itself counts, and other worlds aren't
+/// searched. A name that belongs to another save (world `W` vs. save `W_2`) is left out.
+fn world_roots(minecraft_dir: &Path, world: &str) -> BTreeSet<PathBuf> {
+    let world_prefix = format!("{world}_");
+    // Other saves whose names start with `<world>_`, as (name, `<name>_`).
+    let other_saves: Vec<(String, String)> = list_saves(minecraft_dir)
+        .into_iter()
+        .filter(|save| save.starts_with(&world_prefix))
+        .map(|save| {
+            let prefix = format!("{save}_");
+            (save, prefix)
+        })
+        .collect();
+    let belongs_to_world = |name: &str| {
+        (name == world || name.starts_with(&world_prefix))
+            && !other_saves
+                .iter()
+                .any(|(other, prefix)| name == other || name.starts_with(prefix.as_str()))
+    };
+    let backups = backups_dir_in(minecraft_dir).canonicalize().ok();
+    let skip_top_level = |name: &str| {
+        name.starts_with('.')
+            || (backups.is_some() && minecraft_dir.join(name).canonicalize().ok() == backups)
+    };
+
+    let mut roots = BTreeSet::new();
+    let mut pending = vec![PathBuf::new()];
+    while let Some(relative_dir) = pending.pop() {
+        let depth = relative_dir.components().count();
+        let in_saves = relative_dir == Path::new("saves");
+        let Ok(entries) = std::fs::read_dir(minecraft_dir.join(&relative_dir)) else {
+            continue;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let relative_path = relative_dir.join(&name);
+            if depth == 0 {
+                if !skip_top_level(&name) {
+                    pending.push(relative_path);
+                }
+            } else if in_saves {
+                if name == world {
+                    roots.insert(relative_path);
+                } else if !entry.path().join("level.dat").exists() {
+                    // Shared folders like `saves/NEI` can hold per-world data further down.
+                    pending.push(relative_path);
+                }
+            } else if belongs_to_world(&name) {
+                roots.insert(relative_path);
+            } else if depth + 1 < WORLD_ROOT_MAX_DEPTH {
+                pending.push(relative_path);
+            }
+        }
+    }
+    roots
+}
+
 /// Zips every existing file under `roots` (relative to `minecraft_dir`) into a new
 /// `yyyy-mm-dd-hh-mm-ss.zip` in `backups_dir`, matching ServerUtilities' own layout.
 fn create_backup(
@@ -298,8 +459,15 @@ fn create_backup(
                 .map_err(io::Error::other)?;
         }
 
-        writer.finish().map_err(io::Error::other)?;
-        Ok(())
+        // Surface errors from the final flush (e.g. a full disk) instead of letting the
+        // `BufWriter` swallow them on drop, and make sure the data is on disk before the
+        // restore goes on to replace anything.
+        let file = writer
+            .finish()
+            .map_err(io::Error::other)?
+            .into_inner()
+            .map_err(|err| err.into_error())?;
+        file.sync_all()
     })();
 
     match result {
@@ -389,31 +557,65 @@ fn extract_to_staging<R: io::Read + io::Seek>(
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        io::copy(&mut file, &mut BufWriter::new(File::create(&destination)?))?;
+        io::copy(&mut file, &mut File::create(&destination)?)?;
     }
     Ok(())
 }
 
-/// Replaces each root under `minecraft_dir` with its staged copy.
+/// Replaces each root under `minecraft_dir` with its staged copy. Current roots are moved into
+/// `previous` rather than deleted, so if any step fails everything done so far is moved back and
+/// `minecraft_dir` is left as it was. The caller deletes `previous` after a successful swap.
 fn swap_in_roots(
     minecraft_dir: &Path,
     staging: &Path,
+    previous: &Path,
     roots: &BTreeSet<PathBuf>,
 ) -> io::Result<()> {
-    for root in roots {
-        let target = minecraft_dir.join(root);
-        match std::fs::symlink_metadata(&target) {
-            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&target)?,
-            Ok(_) => std::fs::remove_file(&target)?,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
+    let mut moved_aside = Vec::new();
+    let mut swapped_in = Vec::new();
+
+    let result = (|| -> io::Result<()> {
+        for root in roots {
+            let target = minecraft_dir.join(root);
+            if std::fs::symlink_metadata(&target).is_ok() {
+                move_path(&target, &previous.join(root))?;
+                moved_aside.push(root);
+            }
+            move_path(&staging.join(root), &target)?;
+            swapped_in.push(root);
         }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+        Ok(())
+    })();
+
+    if let Err(err) = result {
+        for root in swapped_in.iter().rev() {
+            let _ = std::fs::rename(minecraft_dir.join(root), staging.join(root));
         }
-        std::fs::rename(staging.join(root), &target)?;
+        let mut stranded = Vec::new();
+        for root in moved_aside.iter().rev() {
+            if std::fs::rename(previous.join(root), minecraft_dir.join(root)).is_err() {
+                stranded.push(root.display().to_string());
+            }
+        }
+        if !stranded.is_empty() {
+            return Err(io::Error::other(format!(
+                "{err}; could not move back {} from {}",
+                stranded.join(", "),
+                previous.display()
+            )));
+        }
+        let _ = std::fs::remove_dir_all(previous);
+        return Err(err);
     }
     Ok(())
+}
+
+/// Renames `from` to `to`, creating `to`'s parent folders first.
+fn move_path(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(from, to)
 }
 
 #[cfg(test)]
@@ -512,6 +714,129 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&minecraft).unwrap();
+    }
+
+    #[test]
+    fn resolves_the_backups_folder_of_an_unloaded_instance() {
+        let minecraft = test_dir("dir-in");
+        assert_eq!(backups_dir_in(&minecraft), minecraft.join("./backups/"));
+
+        write(
+            &minecraft.join("serverutilities/serverutilities.cfg"),
+            "backups {\n    S:backup_folder_path=./other-backups/\n}\n",
+        );
+        assert_eq!(
+            backups_dir_in(&minecraft),
+            minecraft.join("./other-backups/")
+        );
+
+        std::fs::remove_dir_all(&minecraft).unwrap();
+    }
+
+    #[test]
+    fn lists_saves_with_a_level_dat() {
+        let minecraft = test_dir("saves");
+        write(&minecraft.join("saves/B/level.dat"), "");
+        write(&minecraft.join("saves/A/level.dat"), "");
+        write(&minecraft.join("saves/NEI/global/bookmarks.ini"), "");
+
+        assert_eq!(list_saves(&minecraft), ["A", "B"]);
+
+        std::fs::remove_dir_all(&minecraft).unwrap();
+    }
+
+    #[test]
+    fn finds_a_worlds_folders_on_disk() {
+        let minecraft = test_dir("world-roots");
+        for file in [
+            "saves/W/level.dat",
+            "saves/W_2/level.dat",
+            "saves/Other/level.dat",
+            "saves/Other/W/data.dat",
+            "saves/NEI/local/W/NEI.dat",
+            "journeymap/data/sp/W/DIM0/day/0,0.png",
+            "journeymap/data/sp/W_2/DIM0/day/0,0.png",
+            "visualprospecting/client/e25e/W_c983/DIM0.dat",
+            "visualprospecting/server/W_c983/DIM0.dat",
+            "visualprospecting/server/W_2_c983/DIM0.dat",
+            "W/top-level.dat",
+            "backups/W/stray.dat",
+            ".gtnh-restore-staging/saves/W/level.dat",
+            "too/deep/for/the/W/walk.dat",
+        ] {
+            write(&minecraft.join(file), "");
+        }
+
+        let roots: Vec<PathBuf> = world_roots(&minecraft, "W").into_iter().collect();
+        assert_eq!(
+            roots,
+            paths(&[
+                "journeymap/data/sp/W",
+                "saves/NEI/local/W",
+                "saves/W",
+                "visualprospecting/client/e25e/W_c983",
+                "visualprospecting/server/W_c983",
+            ])
+        );
+
+        std::fs::remove_dir_all(&minecraft).unwrap();
+    }
+
+    #[test]
+    fn migrates_a_save_into_another_instance() {
+        let root = test_dir("migrate");
+        let source = root.join("A/.minecraft");
+        let target = root.join("B/.minecraft");
+        write(&source.join("saves/W/level.dat"), "new level");
+        write(&source.join("saves/W/region/r.0.0.mca"), "new region");
+        write(&source.join("journeymap/data/sp/W/map.png"), "new map");
+        write(&target.join("saves/W/level.dat"), "old level");
+        write(&target.join("saves/W/stale.dat"), "stale");
+        write(&target.join("saves/Other/level.dat"), "untouched");
+
+        let report = migrate(&source, "W", &target).unwrap();
+
+        let read = |path: &Path| std::fs::read_to_string(path).unwrap();
+        assert_eq!(read(&target.join("saves/W/level.dat")), "new level");
+        assert_eq!(read(&target.join("saves/W/region/r.0.0.mca")), "new region");
+        assert_eq!(
+            read(&target.join("journeymap/data/sp/W/map.png")),
+            "new map"
+        );
+        assert!(!target.join("saves/W/stale.dat").exists());
+        assert_eq!(read(&target.join("saves/Other/level.dat")), "untouched");
+        assert!(!target.join(MIGRATE_DIR).exists());
+        assert!(!target.join(STAGING_DIR).exists());
+        assert_eq!(read(&source.join("saves/W/level.dat")), "new level");
+        assert!(!source.join("backups").exists());
+
+        assert!(report.safety_backup.starts_with(target.join("backups")));
+        let (_, safety_files) = zip_contents(&report.safety_backup);
+        assert_eq!(
+            safety_files,
+            [
+                ("saves/W/level.dat", "old level"),
+                ("saves/W/stale.dat", "stale"),
+            ]
+            .map(|(name, contents)| (name.to_string(), contents.to_string()))
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_migrate_onto_the_same_instance_or_a_missing_save() {
+        let minecraft = test_dir("migrate-self");
+        write(&minecraft.join("saves/W/level.dat"), "level");
+
+        assert!(migrate(&minecraft, "W", &minecraft).is_err());
+        assert!(migrate(&minecraft, "Missing", &minecraft.join("../nowhere")).is_err());
+        let other = test_dir("migrate-self-target");
+        assert!(migrate(&minecraft, "Missing", &other).is_err());
+        assert!(!other.join(MIGRATE_DIR).exists());
+
+        std::fs::remove_dir_all(&minecraft).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
     }
 
     #[test]
@@ -622,6 +947,7 @@ mod tests {
             "untouched"
         );
         assert!(!minecraft.join(STAGING_DIR).exists());
+        assert!(!minecraft.join(PREVIOUS_DIR).exists());
         assert!(world.join("backpacks").is_dir());
 
         let (safety_world, safety_files) = zip_contents(&report.safety_backup);
@@ -635,6 +961,51 @@ mod tests {
                 ("saves/World/region/r.1.0.mca", "new region"),
             ]
             .map(|(name, contents)| (name.to_string(), contents.to_string()))
+        );
+
+        std::fs::remove_dir_all(&minecraft).unwrap();
+    }
+
+    #[test]
+    fn a_failed_swap_puts_every_root_back() {
+        let minecraft = test_dir("swap-rollback");
+        let staging = minecraft.join(STAGING_DIR);
+        let previous = minecraft.join(PREVIOUS_DIR);
+        write(&minecraft.join("a/W/x.dat"), "old a");
+        write(&minecraft.join("b/W/y.dat"), "old b");
+        write(&staging.join("a/W/x.dat"), "new a");
+        // No staged copy of b/W, so swapping it in fails after a/W was already replaced.
+
+        let roots = BTreeSet::from([PathBuf::from("a/W"), PathBuf::from("b/W")]);
+        assert!(swap_in_roots(&minecraft, &staging, &previous, &roots).is_err());
+
+        let read = |path: &str| std::fs::read_to_string(minecraft.join(path)).unwrap();
+        assert_eq!(read("a/W/x.dat"), "old a");
+        assert_eq!(read("b/W/y.dat"), "old b");
+        assert!(!previous.exists());
+
+        std::fs::remove_dir_all(&minecraft).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_restore_over_a_leftover_previous_folder() {
+        let minecraft = test_dir("leftover-previous");
+        let backups = minecraft.join("backups");
+        write(&minecraft.join("saves/World/level.dat"), "level");
+        let roots = BTreeSet::from([PathBuf::from("saves/World")]);
+        create_backup(&minecraft, &backups, &roots, "World").unwrap();
+        let backup = list_backups(&backups).remove(0);
+
+        write(
+            &minecraft.join(PREVIOUS_DIR).join("saves/World/level.dat"),
+            "only copy",
+        );
+        assert!(restore(&minecraft, &backups, &backup).is_err());
+        assert!(
+            minecraft
+                .join(PREVIOUS_DIR)
+                .join("saves/World/level.dat")
+                .exists()
         );
 
         std::fs::remove_dir_all(&minecraft).unwrap();

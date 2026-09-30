@@ -44,12 +44,25 @@ impl Changeset {
     }
 
     /// Applies every recorded edit onto `store`. Returns the paths that no longer resolved
-    /// to an existing property, so the caller can surface them instead of failing silently.
-    pub fn apply(&self, store: &mut ConfigStore) -> Vec<PropertyPath> {
+    /// to an existing property of the same shape (scalar or list), so the caller can surface
+    /// them instead of failing silently.
+    ///
+    /// Where the store holds something other than `new_value`, that value becomes the entry's
+    /// `original_value`: it's what's really there (e.g. after a modpack update, or in another
+    /// instance), so it's what `revert` must restore.
+    pub fn apply(&mut self, store: &mut ConfigStore) -> Vec<PropertyPath> {
         let mut unresolved = Vec::new();
-        for entry in &self.entries {
-            if !store.set_property_value(&entry.path, entry.new_value.clone()) {
-                unresolved.push(entry.path.clone());
+        for entry in &mut self.entries {
+            let current = match store.get_property(&entry.path) {
+                Some(property) if property.value.same_shape(&entry.new_value) => &property.value,
+                _ => {
+                    unresolved.push(entry.path.clone());
+                    continue;
+                }
+            };
+            if *current != entry.new_value {
+                entry.original_value = current.clone();
+                store.set_property_value(&entry.path, entry.new_value.clone());
             }
         }
         unresolved
@@ -60,19 +73,16 @@ impl Changeset {
     pub fn revert(&self, store: &mut ConfigStore) -> Vec<PropertyPath> {
         let mut unresolved = Vec::new();
         for entry in &self.entries {
-            if !store.set_property_value(&entry.path, entry.original_value.clone()) {
+            let same_shape = store
+                .get_property(&entry.path)
+                .is_some_and(|property| property.value.same_shape(&entry.original_value));
+            if same_shape {
+                store.set_property_value(&entry.path, entry.original_value.clone());
+            } else {
                 unresolved.push(entry.path.clone());
             }
         }
         unresolved
-    }
-
-    pub fn to_json(&self) -> serde_json::Result<String> {
-        serde_json::to_string_pretty(self)
-    }
-
-    pub fn from_json(json: &str) -> serde_json::Result<Self> {
-        serde_json::from_str(json)
     }
 }
 
@@ -82,19 +92,19 @@ mod tests {
 
     use super::*;
     use crate::config_store::ConfigFileEntry;
-    use crate::forge_cfg;
+
+    fn store_with(cfg: &str) -> ConfigStore {
+        ConfigStore {
+            minecraft_dir: PathBuf::new(),
+            files: vec![
+                ConfigFileEntry::parse(PathBuf::from("thing.cfg"), cfg.to_string()).unwrap(),
+            ],
+        }
+    }
 
     #[test]
     fn apply_only_touches_recorded_paths_and_skips_missing_ones() {
-        let ast = forge_cfg::parse("modules {\n    B:Flag=true\n    B:Other=true\n}\n").unwrap();
-        let mut store = ConfigStore {
-            minecraft_dir: PathBuf::new(),
-            files: vec![ConfigFileEntry {
-                relative_path: PathBuf::from("thing.cfg"),
-                ast,
-                dirty: false,
-            }],
-        };
+        let mut store = store_with("modules {\n    B:Flag=true\n    B:Other=true\n}\n");
 
         let mut changeset = Changeset::default();
         changeset.record(
@@ -119,6 +129,7 @@ mod tests {
         let unresolved = changeset.apply(&mut store);
         assert_eq!(unresolved.len(), 1);
         assert_eq!(unresolved[0].property_name, "Removed");
+        assert!(store.has_unsaved_changes());
 
         let flag = store.get_property(&PropertyPath {
             relative_path: PathBuf::from("thing.cfg"),
@@ -143,15 +154,7 @@ mod tests {
 
     #[test]
     fn revert_restores_original_values() {
-        let ast = forge_cfg::parse("modules {\n    B:Flag=true\n}\n").unwrap();
-        let mut store = ConfigStore {
-            minecraft_dir: PathBuf::new(),
-            files: vec![ConfigFileEntry {
-                relative_path: PathBuf::from("thing.cfg"),
-                ast,
-                dirty: false,
-            }],
-        };
+        let mut store = store_with("modules {\n    B:Flag=true\n}\n");
         let path = PropertyPath {
             relative_path: PathBuf::from("thing.cfg"),
             category_path: vec!["modules".to_string()],
@@ -179,21 +182,34 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_through_json() {
-        let mut changeset = Changeset::default();
-        changeset.record(
-            PropertyPath {
-                relative_path: PathBuf::from("thing.cfg"),
-                category_path: vec!["modules".to_string()],
-                property_name: "Flag".to_string(),
-            },
-            PropertyValue::Single("true".to_string()),
-            PropertyValue::Single("false".to_string()),
-        );
+    fn apply_rebases_originals_onto_what_is_actually_there() {
+        let mut store =
+            store_with("modules {\n    I:Count=5\n    I:Same=2\n    I:L <\n     >\n}\n");
+        let path = |name: &str| PropertyPath {
+            relative_path: PathBuf::from("thing.cfg"),
+            category_path: vec!["modules".to_string()],
+            property_name: name.to_string(),
+        };
+        let single = |value: &str| PropertyValue::Single(value.to_string());
 
-        let json = changeset.to_json().unwrap();
-        let reparsed = Changeset::from_json(&json).unwrap();
-        assert_eq!(changeset, reparsed);
+        let mut changeset = Changeset::default();
+        // Recorded against an older version of the file, where Count was 1.
+        changeset.record(path("Count"), single("1"), single("9"));
+        // Already applied on disk: the stored original is the only record of the old value.
+        changeset.record(path("Same"), single("0"), single("2"));
+        // The property became a list since this was recorded.
+        changeset.record(path("L"), single("a"), single("b"));
+
+        let unresolved = changeset.apply(&mut store);
+        assert_eq!(unresolved, [path("L")]);
+        assert_eq!(changeset.entries[0].original_value, single("5"));
+        assert_eq!(changeset.entries[1].original_value, single("0"));
+
+        changeset.revert(&mut store);
+        assert_eq!(
+            store.get_property(&path("Count")).unwrap().value,
+            single("5")
+        );
     }
 
     #[test]

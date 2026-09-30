@@ -3,15 +3,10 @@
 use iced::widget::{
     button, column, container, row, scrollable, space, text, text_editor, text_input,
 };
-use iced::{Alignment, Element, Font, Length, font};
+use iced::{Alignment, Element, Font, Length};
 
 use super::{Dialog, Message, State, style};
 use crate::tree;
-
-const BOLD: Font = Font {
-    weight: font::Weight::Semibold,
-    ..Font::DEFAULT
-};
 
 /// The active dialog's card, or `None` when no dialog is open.
 pub fn view(state: &State) -> Option<Element<'_, Message>> {
@@ -145,18 +140,101 @@ pub fn view(state: &State) -> Option<Element<'_, Message>> {
                 vec![cancel(), primary("Restore", Message::ConfirmRestore)],
                 460.0,
             ),
-            Dialog::Restoring { name } => (
-                "Restoring…".to_string(),
-                text(format!(
-                    "Restoring {name}. This can take a while for large worlds."
-                ))
+            Dialog::ConfirmSwitchInstance { path } => {
+                let name = state.selected_profile.as_deref().unwrap_or_default();
+                let profile = state.profile_store.get(name);
+                let edits = profile.map_or(0, |profile| profile.changeset.entries.len());
+                let has_files = profile.is_some_and(|profile| !profile.tracked_files.is_empty());
+                let what = if has_files {
+                    format!("The profile's {edits} config edit(s) and its saved ranks.txt")
+                } else {
+                    format!("The profile's {edits} config edit(s)")
+                };
+                (
+                    "Switch instance".to_string(),
+                    column![
+                        text(format!(
+                            "Switch to {} and apply profile \"{name}\"?",
+                            path.display()
+                        )),
+                        text(format!(
+                            "{what} will be written to this instance's files. Close Minecraft \
+                             before continuing."
+                        ))
+                        .size(13)
+                        .style(style::muted_text),
+                    ]
+                    .spacing(8)
+                    .into(),
+                    vec![
+                        cancel(),
+                        primary("Switch and apply", Message::ConfirmSwitchInstance),
+                    ],
+                    460.0,
+                )
+            }
+            Dialog::MigrateSave { saves } => {
+                let list: Element<'_, Message> = if saves.is_empty() {
+                    text("No saves found.").style(style::muted_text).into()
+                } else {
+                    let rows: Vec<Element<'_, Message>> = saves
+                        .iter()
+                        .map(|world| {
+                            button(text(world).size(14))
+                                .width(Length::Fill)
+                                .padding([6, 10])
+                                .style(|theme, status| style::list_row(theme, status, false))
+                                .on_press(Message::MigrateSaveSelected(world.clone()))
+                                .into()
+                        })
+                        .collect();
+                    scrollable(column(rows).spacing(2))
+                        .height(Length::Fixed(360.0))
+                        .into()
+                };
+                (
+                    "Migrate a save".to_string(),
+                    column![
+                        text("Pick a save, then the instance to copy it into.")
+                            .size(12)
+                            .style(style::muted_text),
+                        list,
+                    ]
+                    .spacing(8)
+                    .into(),
+                    vec![cancel()],
+                    460.0,
+                )
+            }
+            Dialog::ConfirmMigrate { world, target } => (
+                "Migrate save".to_string(),
+                column![
+                    text(format!("Migrate \"{world}\" to {}?", target.display())),
+                    text(
+                        "Close Minecraft in both instances. Any existing copy of this world in the \
+                         target is first backed up to its backups folder, then replaced. The save in \
+                         this instance is not changed."
+                    )
+                    .size(13)
+                    .style(style::muted_text),
+                ]
+                .spacing(8)
                 .into(),
+                vec![cancel(), primary("Migrate", Message::ConfirmMigrate)],
+                460.0,
+            ),
+            Dialog::Busy { title, message } => (
+                title.clone(),
+                text(message).into(),
                 Vec::new(),
                 420.0,
             ),
-            Dialog::EditList { path, content } => (
-                format!("Edit {}", path.property_name),
-                column![
+            Dialog::EditList {
+                path,
+                content,
+                error,
+            } => {
+                let mut body = column![
                     text(tree::breadcrumb(path)).size(12).style(style::muted_text),
                     text("One entry per line. Blank lines are ignored.")
                         .size(12)
@@ -167,14 +245,20 @@ pub fn view(state: &State) -> Option<Element<'_, Message>> {
                         .size(13)
                         .height(Length::Fixed(320.0)),
                 ]
-                .spacing(8)
-                .into(),
-                vec![cancel(), primary("Apply", Message::ConfirmListEdit)],
-                520.0,
-            ),
+                .spacing(8);
+                if let Some(error) = error {
+                    body = body.push(text(error).size(13).style(style::danger_text));
+                }
+                (
+                    format!("Edit {}", path.property_name),
+                    body.into(),
+                    vec![cancel(), primary("Apply", Message::ConfirmListEdit)],
+                    520.0,
+                )
+            }
         };
 
-    let mut card = column![text(title).size(18).font(BOLD), body].spacing(14);
+    let mut card = column![text(title).size(18).font(style::BOLD), body].spacing(14);
     if !buttons.is_empty() {
         card = card.push(
             row![space::horizontal()]

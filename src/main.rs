@@ -3,6 +3,7 @@ mod backups;
 mod changeset;
 mod config_store;
 mod forge_cfg;
+mod fsutil;
 mod profiles;
 mod search;
 mod settings;

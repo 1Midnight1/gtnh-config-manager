@@ -142,25 +142,37 @@ fn collect_categories(items: &[Item], parent: &[String]) -> Vec<CategoryNode> {
                     path,
                 })
             }
-            Item::Property(_) => None,
+            Item::Property(_) | Item::Trivia(_) => None,
         })
         .collect()
 }
 
-/// "Mod › file.cfg › category › subcategory" for the location containing `path`. The file
-/// name is left out when it just repeats the mod name.
-pub fn breadcrumb(path: &PropertyPath) -> String {
-    location_breadcrumb(&path.relative_path, &path.category_path)
+/// The segments of "Mod › file.cfg › category › subcategory" for a location, each with how
+/// many components of `category_path` the location it stands for has (0 for the mod and file).
+/// The file name is left out when it just repeats the mod name.
+pub fn crumbs(relative_path: &Path, category_path: &[String]) -> Vec<(String, usize)> {
+    let mod_name = mod_display_name(relative_path);
+    let repeats_mod = file_stem(relative_path) == mod_name;
+    let mut crumbs = vec![(mod_name, 0)];
+    if !repeats_mod {
+        crumbs.push((file_name(relative_path), 0));
+    }
+    crumbs.extend(
+        category_path
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index + 1)),
+    );
+    crumbs
 }
 
-pub fn location_breadcrumb(relative_path: &Path, category_path: &[String]) -> String {
-    let mod_name = mod_display_name(relative_path);
-    let mut crumbs = vec![mod_name.clone()];
-    if file_stem(relative_path) != mod_name {
-        crumbs.push(file_name(relative_path));
-    }
-    crumbs.extend(category_path.iter().cloned());
-    crumbs.join(CRUMB_SEPARATOR)
+/// "Mod › file.cfg › category › subcategory" for the location containing `path`.
+pub fn breadcrumb(path: &PropertyPath) -> String {
+    crumbs(&path.relative_path, &path.category_path)
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect::<Vec<_>>()
+        .join(CRUMB_SEPARATOR)
 }
 
 /// The property's index among the properties directly in its category, and how many there are.
@@ -170,7 +182,7 @@ pub fn property_position(store: &ConfigStore, path: &PropertyPath) -> Option<(us
         .iter()
         .filter_map(|item| match item {
             Item::Property(property) => Some(property.name.as_str()),
-            Item::Category(_) => None,
+            Item::Category(_) | Item::Trivia(_) => None,
         })
         .collect();
     let index = names.iter().position(|name| *name == path.property_name)?;
@@ -181,17 +193,14 @@ pub fn property_position(store: &ConfigStore, path: &PropertyPath) -> Option<(us
 mod tests {
     use super::*;
     use crate::config_store::ConfigFileEntry;
-    use crate::forge_cfg;
 
     fn store_with(files: &[(&str, &str)]) -> ConfigStore {
         ConfigStore {
             minecraft_dir: PathBuf::new(),
             files: files
                 .iter()
-                .map(|(path, cfg)| ConfigFileEntry {
-                    relative_path: PathBuf::from(path),
-                    ast: forge_cfg::parse(cfg).unwrap(),
-                    dirty: false,
+                .map(|(path, cfg)| {
+                    ConfigFileEntry::parse(PathBuf::from(path), cfg.to_string()).unwrap()
                 })
                 .collect(),
         }
@@ -257,8 +266,8 @@ mod tests {
         );
         assert_eq!(property_position(&store, &path), Some((2, 3)));
         assert_eq!(
-            location_breadcrumb(Path::new("config/ironchest.cfg"), &[]),
-            "ironchest"
+            crumbs(Path::new("config/ironchest.cfg"), &["a".to_string()]),
+            [("ironchest".to_string(), 0), ("a".to_string(), 1)]
         );
     }
 }

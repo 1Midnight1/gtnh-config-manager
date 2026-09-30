@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::changeset::Changeset;
+use crate::fsutil;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
@@ -25,36 +26,49 @@ pub struct ProfileStore {
 
 impl ProfileStore {
     fn path() -> Option<PathBuf> {
-        let dirs = directories::ProjectDirs::from("", "", "gtnh-config-manager")?;
-        Some(dirs.config_dir().join("profiles.json"))
+        fsutil::app_config_path("profiles.json")
     }
 
-    pub fn load() -> ProfileStore {
-        Self::load_from(Self::path().as_deref())
+    /// Loads the saved profiles, plus a warning if the file existed but couldn't be read.
+    pub fn load() -> (ProfileStore, Option<String>) {
+        match Self::path() {
+            Some(path) => Self::load_from(&path),
+            None => (ProfileStore::default(), None),
+        }
     }
 
-    fn load_from(path: Option<&Path>) -> ProfileStore {
-        let Some(path) = path else {
-            return ProfileStore::default();
-        };
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            return ProfileStore::default();
-        };
-        serde_json::from_str(&contents).unwrap_or_default()
+    /// A damaged file is moved aside (to `profiles.json.corrupt-<timestamp>`) rather than left
+    /// in place, so the next save can't overwrite the only copy of the user's profiles.
+    fn load_from(path: &Path) -> (ProfileStore, Option<String>) {
+        match fsutil::load_json(path) {
+            Ok(store) => (store.unwrap_or_default(), None),
+            Err(err) => {
+                let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                let aside = path.with_extension(format!("json.corrupt-{timestamp}"));
+                let warning = match std::fs::rename(path, &aside) {
+                    Ok(()) => format!(
+                        "Couldn't read saved profiles ({err}); the file was moved to {}",
+                        aside.display()
+                    ),
+                    Err(rename_err) => format!(
+                        "Couldn't read saved profiles ({err}) or move the file aside \
+                         ({rename_err}); saving will overwrite {}",
+                        path.display()
+                    ),
+                };
+                (ProfileStore::default(), Some(warning))
+            }
+        }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        self.save_to(
-            Self::path().ok_or_else(|| std::io::Error::other("no config directory available"))?,
-        )
+        let path =
+            Self::path().ok_or_else(|| std::io::Error::other("no config directory available"))?;
+        self.save_to(&path)
     }
 
-    fn save_to(&self, path: PathBuf) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, contents)
+    fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        fsutil::save_json(path, self)
     }
 
     /// Creates a new profile, or overwrites the changeset of an existing one with the same name
@@ -107,10 +121,27 @@ mod tests {
 
         let mut store = ProfileStore::default();
         store.upsert("My Profile".to_string(), Changeset::default());
-        store.save_to(path.clone()).unwrap();
+        store.save_to(&path).unwrap();
 
-        let loaded = ProfileStore::load_from(Some(&path));
-        assert_eq!(loaded, store);
+        assert_eq!(ProfileStore::load_from(&path), (store, None));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn moves_a_damaged_file_aside_instead_of_loading_it_as_empty() {
+        let dir = std::env::temp_dir().join(format!("gtnh-profiles-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profiles.json");
+        std::fs::write(&path, "{\"profiles\": [trunc").unwrap();
+
+        let (store, warning) = ProfileStore::load_from(&path);
+        assert_eq!(store, ProfileStore::default());
+        assert!(warning.is_some());
+        assert!(!path.exists());
+        let moved: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(moved.len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
     }

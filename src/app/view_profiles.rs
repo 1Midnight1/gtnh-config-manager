@@ -4,20 +4,14 @@
 use std::path::Path;
 
 use iced::widget::{button, column, container, row, rule, scrollable, space, text};
-use iced::{Alignment, Element, Font, Length, font};
+use iced::{Alignment, Element, Font, Length};
 
 use super::{Message, RanksSource, State, style};
 use crate::profiles::Profile;
-use crate::search;
 use crate::tracked_files;
 use crate::tree;
 
 const LIST_WIDTH: f32 = 280.0;
-
-const BOLD: Font = Font {
-    weight: font::Weight::Semibold,
-    ..Font::DEFAULT
-};
 
 pub fn view(state: &State) -> Element<'_, Message> {
     let viewing = state
@@ -50,7 +44,7 @@ fn profile_list<'a>(state: &'a State, viewing: Option<&str>) -> Element<'a, Mess
             let active = state.selected_profile.as_deref() == Some(profile.name.as_str());
             let selected = viewing == Some(profile.name.as_str());
 
-            let mut title = row![text(&profile.name).size(14).font(BOLD)]
+            let mut title = row![text(&profile.name).size(14).font(style::BOLD)]
                 .spacing(8)
                 .align_y(Alignment::Center);
             if active {
@@ -80,7 +74,7 @@ fn profile_list<'a>(state: &'a State, viewing: Option<&str>) -> Element<'a, Mess
     container(
         column![
             row![
-                text("Profiles").size(16).font(BOLD),
+                text("Profiles").size(16).font(style::BOLD),
                 space::horizontal(),
                 button(text("New…").size(13))
                     .padding([4, 10])
@@ -129,7 +123,7 @@ fn profile_detail<'a>(state: &'a State, profile: &'a Profile) -> Element<'a, Mes
 
     let header = row![
         column![
-            text(&profile.name).size(22).font(BOLD),
+            text(&profile.name).size(22).font(style::BOLD),
             text(change_summary(profile))
                 .size(13)
                 .style(style::muted_text),
@@ -163,7 +157,7 @@ fn profile_detail<'a>(state: &'a State, profile: &'a Profile) -> Element<'a, Mes
 }
 
 fn section_title(label: &str) -> Element<'_, Message> {
-    text(label).size(15).font(BOLD).into()
+    text(label).size(15).font(style::BOLD).into()
 }
 
 fn changes_table(profile: &Profile) -> Element<'_, Message> {
@@ -184,14 +178,8 @@ fn changes_table(profile: &Profile) -> Element<'_, Message> {
         .entries
         .iter()
         .map(|entry| {
-            let original: String = search::display_value(&entry.original_value)
-                .chars()
-                .take(60)
-                .collect();
-            let new: String = search::display_value(&entry.new_value)
-                .chars()
-                .take(60)
-                .collect();
+            let original = style::truncate(&entry.original_value.display_text(), 60);
+            let new = style::truncate(&entry.new_value.display_text(), 60);
             let content = row![
                 column![
                     text(&entry.path.property_name).size(14),

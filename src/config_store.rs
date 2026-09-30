@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::forge_cfg::{self, ConfigFile, Item, Property, PropertyValue};
+use crate::fsutil;
 
 /// Top-level directories (relative to `.minecraft`) scanned for `.cfg` files, each up to one
 /// subdirectory deep.
@@ -27,7 +28,31 @@ pub struct PropertyPath {
 pub struct ConfigFileEntry {
     pub relative_path: PathBuf,
     pub ast: ConfigFile,
-    pub dirty: bool,
+    /// The file's contents as last read from or written to disk.
+    disk_text: String,
+    /// Set when a value changes; the file may still match `disk_text` if it was changed back.
+    touched: bool,
+}
+
+impl ConfigFileEntry {
+    /// Parses `contents`, read from `relative_path`.
+    pub fn parse(relative_path: PathBuf, contents: String) -> Result<Self, forge_cfg::ParseError> {
+        Ok(ConfigFileEntry {
+            relative_path,
+            ast: forge_cfg::parse(&contents)?,
+            disk_text: contents,
+            touched: false,
+        })
+    }
+
+    /// The new contents to write, if the file no longer matches what's on disk.
+    fn pending_text(&self) -> Option<String> {
+        if !self.touched {
+            return None;
+        }
+        let text = self.ast.to_string();
+        (text != self.disk_text).then_some(text)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,8 +62,9 @@ pub struct ConfigStore {
     pub files: Vec<ConfigFileEntry>,
 }
 
+/// A file that couldn't be read, parsed or written.
 #[derive(Debug, Clone)]
-pub struct LoadError {
+pub struct FileError {
     pub relative_path: PathBuf,
     pub message: String,
 }
@@ -48,25 +74,21 @@ impl ConfigStore {
     /// scanned up to one subdirectory deep), then parses each of them. A single file failing
     /// to parse doesn't abort the whole load; its error is returned alongside the store built
     /// from the remaining files.
-    pub fn load(minecraft_dir: &Path) -> (ConfigStore, Vec<LoadError>) {
+    pub fn load(minecraft_dir: &Path) -> (ConfigStore, Vec<FileError>) {
         let mut files = Vec::new();
         let mut errors = Vec::new();
 
         for relative_path in discover_cfg_files(minecraft_dir) {
             let absolute_path = minecraft_dir.join(&relative_path);
-            match std::fs::read_to_string(&absolute_path).map_err(|err| err.to_string()) {
-                Ok(contents) => match forge_cfg::parse(&contents) {
-                    Ok(ast) => files.push(ConfigFileEntry {
-                        relative_path,
-                        ast,
-                        dirty: false,
-                    }),
-                    Err(err) => errors.push(LoadError {
-                        relative_path,
-                        message: err.to_string(),
-                    }),
-                },
-                Err(message) => errors.push(LoadError {
+            let entry = std::fs::read_to_string(&absolute_path)
+                .map_err(|err| err.to_string())
+                .and_then(|contents| {
+                    ConfigFileEntry::parse(relative_path.clone(), contents)
+                        .map_err(|err| err.to_string())
+                });
+            match entry {
+                Ok(entry) => files.push(entry),
+                Err(message) => errors.push(FileError {
                     relative_path,
                     message,
                 }),
@@ -84,26 +106,26 @@ impl ConfigStore {
         )
     }
 
-    pub fn get_property(&self, path: &PropertyPath) -> Option<&Property> {
-        let entry = self
-            .files
+    /// The loaded file at `relative_path`.
+    pub fn entry(&self, relative_path: &Path) -> Option<&ConfigFileEntry> {
+        self.files
             .iter()
-            .find(|entry| entry.relative_path == path.relative_path)?;
+            .find(|entry| entry.relative_path == relative_path)
+    }
+
+    pub fn get_property(&self, path: &PropertyPath) -> Option<&Property> {
+        let entry = self.entry(&path.relative_path)?;
         find_property(&entry.ast.items, &path.category_path, &path.property_name)
     }
 
     /// The items directly inside `category_path` of `file` (the file's top level when the path
     /// is empty), or `None` if the file or category doesn't exist.
     pub fn items_at(&self, file: &Path, category_path: &[String]) -> Option<&[Item]> {
-        let entry = self
-            .files
-            .iter()
-            .find(|entry| entry.relative_path == file)?;
-        descend(&entry.ast.items, category_path)
+        descend(&self.entry(file)?.ast.items, category_path)
     }
 
-    /// Sets a property's value in memory and marks its file dirty. Returns false if the path
-    /// no longer resolves to an existing property (e.g. the file changed on disk since loading).
+    /// Sets a property's value in memory. Returns false if the path no longer resolves to an
+    /// existing property (e.g. the file changed on disk since loading).
     pub fn set_property_value(&mut self, path: &PropertyPath, value: PropertyValue) -> bool {
         let Some(entry) = self
             .files
@@ -119,22 +141,29 @@ impl ConfigStore {
         ) else {
             return false;
         };
-        property.value = value;
-        entry.dirty = true;
+        if property.value != value {
+            property.value = value;
+            entry.touched = true;
+        }
         true
     }
 
-    /// Serializes every dirty file back to disk, clearing its dirty flag on success.
-    pub fn save_dirty(&mut self) -> Vec<LoadError> {
+    /// Writes every file whose contents no longer match what's on disk. Files that were
+    /// changed and then changed back aren't rewritten.
+    pub fn save_dirty(&mut self) -> Vec<FileError> {
         let mut errors = Vec::new();
         for entry in &mut self.files {
-            if !entry.dirty {
+            let Some(text) = entry.pending_text() else {
+                entry.touched = false;
                 continue;
-            }
+            };
             let absolute_path = self.minecraft_dir.join(&entry.relative_path);
-            match std::fs::write(&absolute_path, entry.ast.to_string()) {
-                Ok(()) => entry.dirty = false,
-                Err(err) => errors.push(LoadError {
+            match fsutil::write_atomic(&absolute_path, text.as_bytes()) {
+                Ok(()) => {
+                    entry.disk_text = text;
+                    entry.touched = false;
+                }
+                Err(err) => errors.push(FileError {
                     relative_path: entry.relative_path.clone(),
                     message: err.to_string(),
                 }),
@@ -143,8 +172,11 @@ impl ConfigStore {
         errors
     }
 
+    /// Whether any file's contents differ from what's on disk.
     pub fn has_unsaved_changes(&self) -> bool {
-        self.files.iter().any(|entry| entry.dirty)
+        self.files
+            .iter()
+            .any(|entry| entry.pending_text().is_some())
     }
 }
 
@@ -300,10 +332,88 @@ mod tests {
         assert!(store.save_dirty().is_empty());
         assert!(!store.has_unsaved_changes());
 
+        // Changing a value and changing it back leaves nothing to save.
+        assert!(store.set_property_value(&path, PropertyValue::Single("true".to_string())));
+        assert!(store.set_property_value(&path, PropertyValue::Single("false".to_string())));
+        assert!(!store.has_unsaved_changes());
+
         let reloaded = std::fs::read_to_string(dir.join("config/modules/thing.cfg")).unwrap();
         assert!(reloaded.contains("B:Flag=false"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Checks the lossless round-trip against a real instance, without writing anything:
+    /// `GTNH_INSTANCE=/path/to/instance cargo test real_instance -- --ignored`
+    #[test]
+    #[ignore = "needs GTNH_INSTANCE pointing at an instance folder"]
+    fn real_instance_files_round_trip_byte_for_byte() {
+        let instance = std::env::var("GTNH_INSTANCE").expect("GTNH_INSTANCE is not set");
+        let minecraft_dir = Path::new(&instance).join(".minecraft");
+        let (store, errors) = ConfigStore::load(&minecraft_dir);
+        assert!(!store.files.is_empty());
+
+        let mismatched: Vec<_> = store
+            .files
+            .iter()
+            .filter(|entry| {
+                let on_disk = std::fs::read_to_string(minecraft_dir.join(&entry.relative_path));
+                on_disk.ok().as_deref() != Some(entry.ast.to_string().as_str())
+            })
+            .map(|entry| entry.relative_path.clone())
+            .collect();
+        println!(
+            "{} files parsed, {} skipped as unsupported",
+            store.files.len(),
+            errors.len()
+        );
+        for error in &errors {
+            println!(
+                "  skipped {}: {}",
+                error.relative_path.display(),
+                error.message
+            );
+        }
+        assert!(mismatched.is_empty(), "not byte-identical: {mismatched:?}");
+
+        // Changing any one scalar must change exactly one line of its file.
+        for entry in &store.files {
+            let Some(path) = first_scalar(&entry.relative_path, &[], &entry.ast.items) else {
+                continue;
+            };
+            let mut edited = store.clone();
+            let PropertyValue::Single(value) = &store.get_property(&path).unwrap().value else {
+                unreachable!()
+            };
+            edited.set_property_value(&path, PropertyValue::Single(format!("{value}x")));
+            let before = entry.ast.to_string();
+            let after = edited.entry(&entry.relative_path).unwrap().ast.to_string();
+            let changed = before
+                .split('\n')
+                .zip(after.split('\n'))
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(before.split('\n').count(), after.split('\n').count());
+            assert_eq!(changed, 1, "{}", entry.relative_path.display());
+        }
+    }
+
+    fn first_scalar(file: &Path, category_path: &[String], items: &[Item]) -> Option<PropertyPath> {
+        items.iter().find_map(|item| match item {
+            Item::Property(property) if matches!(property.value, PropertyValue::Single(_)) => {
+                Some(PropertyPath {
+                    relative_path: file.to_path_buf(),
+                    category_path: category_path.to_vec(),
+                    property_name: property.name.clone(),
+                })
+            }
+            Item::Category(category) => {
+                let mut nested = category_path.to_vec();
+                nested.push(category.name.clone());
+                first_scalar(file, &nested, &category.items)
+            }
+            _ => None,
+        })
     }
 
     #[test]

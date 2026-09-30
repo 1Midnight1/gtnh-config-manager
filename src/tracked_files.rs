@@ -5,7 +5,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::config_store::LoadError;
+use crate::config_store::FileError;
+use crate::fsutil;
 
 /// ServerUtilities' rank definitions, shown on the Profiles page.
 pub const RANKS_FILE: &str = "serverutilities/server/ranks.txt";
@@ -25,23 +26,19 @@ pub fn capture(minecraft_dir: &Path) -> BTreeMap<PathBuf, String> {
         .collect()
 }
 
-/// Reads one file under `minecraft_dir`, or `None` if it doesn't exist or can't be read.
-pub fn read(minecraft_dir: &Path, relative_path: &Path) -> Option<String> {
-    std::fs::read_to_string(minecraft_dir.join(relative_path)).ok()
+/// Reads ranks.txt under `minecraft_dir`, or `None` if it doesn't exist or can't be read.
+pub fn read_ranks(minecraft_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(minecraft_dir.join(RANKS_FILE)).ok()
 }
 
 /// Writes each stored file back under `minecraft_dir`, creating parent directories as needed.
-pub fn write_all(minecraft_dir: &Path, files: &BTreeMap<PathBuf, String>) -> Vec<LoadError> {
+pub fn write_all(minecraft_dir: &Path, files: &BTreeMap<PathBuf, String>) -> Vec<FileError> {
     let mut errors = Vec::new();
     for (relative_path, contents) in files {
-        let absolute_path = minecraft_dir.join(relative_path);
-        let result = match absolute_path.parent() {
-            Some(parent) => std::fs::create_dir_all(parent),
-            None => Ok(()),
-        }
-        .and_then(|()| std::fs::write(&absolute_path, contents));
-        if let Err(err) = result {
-            errors.push(LoadError {
+        if let Err(err) =
+            fsutil::write_atomic(&minecraft_dir.join(relative_path), contents.as_bytes())
+        {
+            errors.push(FileError {
                 relative_path: relative_path.clone(),
                 message: err.to_string(),
             });
@@ -60,7 +57,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(capture(&dir).is_empty());
-        assert!(read(&dir, Path::new(TRACKED_FILES[0])).is_none());
+        assert!(read_ranks(&dir).is_none());
 
         let ranks = dir.join("serverutilities/server/ranks.txt");
         std::fs::create_dir_all(ranks.parent().unwrap()).unwrap();

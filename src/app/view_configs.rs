@@ -6,7 +6,7 @@ use std::path::Path;
 use iced::widget::{
     button, center, column, container, row, rule, scrollable, space, text, text_input, toggler,
 };
-use iced::{Alignment, Element, Font, Length, font};
+use iced::{Alignment, Element, Font, Length};
 
 use super::{
     Location, MAX_VISIBLE_RESULTS, Message, NodeKey, PROPERTIES_SCROLL, SIDEBAR_SCROLL, State,
@@ -14,7 +14,6 @@ use super::{
 };
 use crate::config_store::{ConfigStore, PropertyPath};
 use crate::forge_cfg::{Item, Property, PropertyType, PropertyValue};
-use crate::search;
 use crate::tree::{self, CategoryNode};
 
 const SIDEBAR_WIDTH: f32 = 300.0;
@@ -22,11 +21,6 @@ const INDENT: f32 = 14.0;
 const EDITOR_WIDTH: f32 = 280.0;
 /// How many entries of a list value are shown before "… and N more".
 const LIST_PREVIEW: usize = 6;
-
-const BOLD: Font = Font {
-    weight: font::Weight::Semibold,
-    ..Font::DEFAULT
-};
 
 /// One visible line of the sidebar, flattened from the mod/file/category tree according to
 /// which nodes are expanded. Also used by `jump_to` to work out where to scroll the sidebar.
@@ -119,7 +113,7 @@ fn push_categories(
     depth: u16,
     rows: &mut Vec<SidebarRow>,
 ) {
-    let Some(entry) = store.files.iter().find(|entry| entry.relative_path == file) else {
+    let Some(entry) = store.entry(file) else {
         return;
     };
     for node in tree::category_tree(&entry.ast) {
@@ -281,17 +275,18 @@ fn main_pane(state: &State) -> Element<'_, Message> {
 }
 
 fn search_results(state: &State) -> Element<'_, Message> {
-    let matches = state.index.filter(&state.search_query);
-    let total = matches.len();
+    let total = state.search_matches.len();
 
-    let rows: Vec<Element<'_, Message>> = matches
-        .into_iter()
+    let rows: Vec<Element<'_, Message>> = state
+        .search_matches
+        .iter()
         .take(MAX_VISIBLE_RESULTS)
+        .filter_map(|&index| state.index.entries.get(index))
         .map(|entry| {
-            let value: String = entry.display_value.chars().take(80).collect();
+            let value = style::truncate(&entry.display_value, 80);
             let content = column![
                 row![
-                    text(&entry.path.property_name).size(14).font(BOLD),
+                    text(&entry.path.property_name).size(14).font(style::BOLD),
                     space::horizontal(),
                     text(value)
                         .size(12)
@@ -364,7 +359,7 @@ fn category_view<'a>(
                         .into(),
                 )
             }
-            Item::Property(_) => None,
+            Item::Property(_) | Item::Trivia(_) => None,
         })
         .collect();
     if !subcategories.is_empty() {
@@ -375,7 +370,7 @@ fn category_view<'a>(
         .iter()
         .filter_map(|item| match item {
             Item::Property(property) => Some(property_card(state, selection, property)),
-            Item::Category(_) => None,
+            Item::Category(_) | Item::Trivia(_) => None,
         })
         .collect();
 
@@ -401,38 +396,14 @@ fn category_view<'a>(
 
 /// Clickable "Mod › file.cfg › category › sub" path to the current location.
 fn breadcrumb(selection: &Location) -> Element<'_, Message> {
-    let file = &selection.file;
-    let mod_name = tree::mod_display_name(file);
-    let file_name = tree::file_name(file);
-    let root = Location {
-        file: file.clone(),
-        category_path: Vec::new(),
-    };
-
-    let mut crumbs: Vec<(String, Location)> = Vec::new();
-    if Path::new(&file_name)
-        .file_stem()
-        .map(|s| s.to_string_lossy())
-        != Some(mod_name.as_str().into())
-    {
-        crumbs.push((mod_name, root.clone()));
-        crumbs.push((file_name, root));
-    } else {
-        crumbs.push((mod_name, root));
-    }
-    for depth in 1..=selection.category_path.len() {
-        crumbs.push((
-            selection.category_path[depth - 1].clone(),
-            Location {
-                file: file.clone(),
-                category_path: selection.category_path[..depth].to_vec(),
-            },
-        ));
-    }
-
+    let crumbs = tree::crumbs(&selection.file, &selection.category_path);
     let last = crumbs.len() - 1;
     let mut parts = row![].spacing(2).align_y(Alignment::Center);
-    for (i, (label, location)) in crumbs.into_iter().enumerate() {
+    for (i, (label, depth)) in crumbs.into_iter().enumerate() {
+        let location = Location {
+            file: selection.file.clone(),
+            category_path: selection.category_path[..depth].to_vec(),
+        };
         if i > 0 {
             parts = parts.push(
                 text(tree::CRUMB_SEPARATOR)
@@ -441,7 +412,7 @@ fn breadcrumb(selection: &Location) -> Element<'_, Message> {
             );
         }
         parts = if i == last {
-            parts.push(text(label).size(18).font(BOLD))
+            parts.push(text(label).size(18).font(style::BOLD))
         } else {
             parts.push(
                 button(text(label).size(16))
@@ -469,9 +440,7 @@ fn description(store: &ConfigStore, selection: &Location) -> String {
             })
             .unwrap_or_default(),
         None => store
-            .files
-            .iter()
-            .find(|entry| entry.relative_path == selection.file)
+            .entry(&selection.file)
             .map(|entry| entry.ast.header_comment.as_slice())
             .unwrap_or_default(),
     };
@@ -503,7 +472,7 @@ fn property_card<'a>(
         .entries
         .iter()
         .find(|entry| entry.path == path && entry.original_value != property.value)
-        .map(|entry| search::display_value(&entry.original_value));
+        .map(|entry| entry.original_value.display_text());
 
     let type_label = match (&property.value, property.prop_type) {
         (PropertyValue::List(_), _) => "list",
@@ -515,7 +484,7 @@ fn property_card<'a>(
 
     let mut info = column![
         row![
-            text(&property.name).size(15).font(BOLD),
+            text(&property.name).size(15).font(style::BOLD),
             container(text(type_label).size(11))
                 .padding([1, 6])
                 .style(style::badge),
@@ -532,7 +501,7 @@ fn property_card<'a>(
     }
     let edited = changed_from.is_some();
     if let Some(original) = changed_from {
-        let original: String = original.chars().take(80).collect();
+        let original = style::truncate(&original, 80);
         info = info.push(
             text(format!("Changed in this profile (was {original})"))
                 .size(12)

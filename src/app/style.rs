@@ -2,7 +2,18 @@
 //! consistent (and works in both light and dark themes).
 
 use iced::widget::{button, container, text};
-use iced::{Background, Border, Color, Theme, border};
+use iced::{Background, Border, Color, Font, Theme, border, font};
+
+/// Font for names and titles.
+pub const BOLD: Font = Font {
+    weight: font::Weight::Semibold,
+    ..Font::DEFAULT
+};
+
+/// The first `max_chars` characters of `value`, for showing long values in a single row.
+pub fn truncate(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
 
 /// Top and bottom bars.
 pub fn bar(theme: &Theme) -> container::Style {
